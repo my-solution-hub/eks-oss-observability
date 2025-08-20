@@ -1,0 +1,156 @@
+global:
+  scrape_interval: 30s
+scrape_configs:
+  # Core Kubernetes state metrics
+  - job_name: kube-state-metrics
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+    - role: endpoints
+      namespaces:
+        names:
+        - kube-state-metrics
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_service_name]
+      action: keep
+      regex: kube-state-metrics
+  
+  # Node-level metrics from kubelet
+  - job_name: kubelet
+    scrape_interval: 30s
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+    - role: node
+    relabel_configs:
+    - action: labelmap
+      regex: __meta_kubernetes_node_label_(.+)
+    - target_label: __address__
+      replacement: kubernetes.default.svc:443
+    - source_labels: [__meta_kubernetes_node_name]
+      regex: (.+)
+      target_label: __metrics_path__
+      replacement: /api/v1/nodes/${1}/proxy/metrics
+  
+  # Container resource metrics from cadvisor
+  - job_name: cadvisor
+    scrape_interval: 30s
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+    - role: node
+    relabel_configs:
+    - action: labelmap
+      regex: __meta_kubernetes_node_label_(.+)
+    - target_label: __address__
+      replacement: kubernetes.default.svc:443
+    - source_labels: [__meta_kubernetes_node_name]
+      regex: (.+)
+      target_label: __metrics_path__
+      replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+    metric_relabel_configs:
+    - source_labels: [__name__]
+      regex: container_(cpu|memory|fs|network).*
+      action: keep
+  
+  # Kubernetes API server metrics
+  - job_name: kubernetes-apiservers
+    scrape_interval: 60s
+    kubernetes_sd_configs:
+    - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+      action: keep
+      regex: default;kubernetes;https
+  
+  # Application pods with prometheus annotations
+  - job_name: kubernetes-pods
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+    - role: pod
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+      action: keep
+      regex: true
+    - source_labels: [__meta_kubernetes_pod_name]
+      action: drop
+      regex: kube-state-metrics.*
+    - source_labels: [__meta_kubernetes_namespace]
+      action: drop
+      regex: kube-state-metrics
+    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+      action: replace
+      target_label: __metrics_path__
+      regex: (.+)
+    - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+      action: replace
+      regex: ([^:]+)(?::\d+)?;(\d+)
+      replacement: $1:$2
+      target_label: __address__
+    # Add custom pod labels to all metrics from this job
+    - source_labels: [__meta_kubernetes_pod_label_team]
+      target_label: team
+    - source_labels: [__meta_kubernetes_pod_label_environment]
+      target_label: environment
+    - source_labels: [__meta_kubernetes_pod_label_project]
+      target_label: project
+    - source_labels: [__meta_kubernetes_pod_label_version]
+      target_label: version
+  
+  # AWS VPC CNI metrics
+  - job_name: aws-node
+    scrape_interval: 60s
+    kubernetes_sd_configs:
+    - role: pod
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_name]
+      action: keep
+      regex: kube-system;aws-node.+
+    - source_labels: [__address__]
+      action: replace
+      target_label: __address__
+      regex: (.+?)(:\d+)?
+      replacement: ${1}:61678
+
+  # CoreDNS metrics (scrape pods directly on port 9153)
+  - job_name: coredns
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+    - role: pod
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_k8s_app]
+      action: keep
+      regex: kube-system;kube-dns
+    - source_labels: [__address__]
+      action: replace
+      target_label: __address__
+      regex: (.+):(.+)
+      replacement: ${1}:9153
+
+  # Node-exporter metrics (system-level metrics from each node)
+  - job_name: node-exporter
+    scrape_interval: 30s
+    kubernetes_sd_configs:
+    - role: pod
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_app]
+      action: keep
+      regex: kube-system;node-exporter
+    - source_labels: [__address__]
+      action: replace
+      target_label: __address__
+      regex: (.+):(.+)
+      replacement: ${1}:9100
+    metric_relabel_configs:
+    - source_labels: [__name__]
+      regex: 'go_.*|process_.*|promhttp_.*'
+      action: drop
