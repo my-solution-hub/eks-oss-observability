@@ -88,7 +88,7 @@ export class CrossStackUtils {
  */
 export const DEFAULT_CONFIG: Partial<StackConfig> = {
   vpcCidr: undefined, // Let CDK auto-assign
-  eksVersion: '1.31',
+  eksVersion: '1.32',
   nodeInstanceType: 't3.large',
   nodeCount: 3
 }

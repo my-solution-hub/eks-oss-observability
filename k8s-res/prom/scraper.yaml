@@ -96,15 +96,6 @@ scrape_configs:
       regex: ([^:]+)(?::\d+)?;(\d+)
       replacement: $1:$2
       target_label: __address__
-    # Add custom pod labels to all metrics from this job
-    - source_labels: [__meta_kubernetes_pod_label_team]
-      target_label: team
-    - source_labels: [__meta_kubernetes_pod_label_environment]
-      target_label: environment
-    - source_labels: [__meta_kubernetes_pod_label_project]
-      target_label: project
-    - source_labels: [__meta_kubernetes_pod_label_version]
-      target_label: version
   
   # AWS VPC CNI metrics
   - job_name: aws-node

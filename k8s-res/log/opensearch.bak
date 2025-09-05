@@ -1,0 +1,30 @@
+  output-opensearch.conf: |
+    [OUTPUT]
+        Name            opensearch
+        Match           *
+        Host            ${OPENSEARCH_ENDPOINT}
+        Port            443
+        Index           logs-%Y.%m.%d.%H
+        AWS_Auth        On
+        AWS_Region      ${AWS_REGION}
+        tls             On
+        tls.verify      Off
+        Suppress_Type_Name On
+        Trace_Error     On
+        Trace_Output    On
+
+  output-opensearch.conf: |
+    [OUTPUT]
+        Name            http
+        Match           *
+        Host            ${LOG_PIPELINE_ENDPOINT}
+        Port            443
+        URI             /log/ingest
+        Format          json
+        aws_auth        true
+        aws_region      ${AWS_REGION}
+        aws_service     osis
+        aws_role_arn    ${FLUENT_BIT_INGESTION_ROLE_ARN}
+        tls             On
+        tls.verify      Off
+        Log_Level       trace

@@ -4,6 +4,7 @@ import * as iam from 'aws-cdk-lib/aws-iam'
 import * as aps from 'aws-cdk-lib/aws-aps'
 import * as grafana from 'aws-cdk-lib/aws-grafana'
 import * as opensearch from 'aws-cdk-lib/aws-opensearchservice'
+import * as osis from 'aws-cdk-lib/aws-osis'
 import * as fs from 'fs'
 import * as path from 'path'
 import { Construct } from 'constructs'
@@ -24,6 +25,40 @@ export class ObservabilityStack extends cdk.Stack {
     props?: cdk.StackProps
   ) {
     super(scope, id, props)
+
+    // Import VPC for OpenSearch domain
+    const vpcId = CrossStackUtils.importValue(ExportNames.NETWORK_VPC_ID)
+    const vpcCidr = CrossStackUtils.importValue(ExportNames.NETWORK_VPC_CIDR)
+    const privateSubnetIds = CrossStackUtils.importListValue(
+      ExportNames.NETWORK_PRIVATE_SUBNET_IDS
+    )
+
+    const vpc = ec2.Vpc.fromVpcAttributes(this, 'ImportedVpc', {
+      vpcId,
+      vpcCidrBlock: vpcCidr,
+      availabilityZones: cdk.Fn.getAzs(),
+      privateSubnetIds
+    })
+
+    // Create security group for OpenSearch
+    const opensearchSecurityGroup = new ec2.SecurityGroup(this, 'OpenSearchSecurityGroup', {
+      vpc,
+      description: 'Security group for OpenSearch domain',
+      allowAllOutbound: false
+    })
+
+    // Allow HTTPS access from VPC CIDR
+    opensearchSecurityGroup.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS access for OpenSearch and OSIS pipelines'
+    )
+
+    opensearchSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'Allow outbound HTTPS traffic'
+    )
 
     // Import EKS resources from InfrastructureStack for IRSA configuration
     const oidcProviderArn = CrossStackUtils.importValue(
@@ -62,30 +97,29 @@ export class ObservabilityStack extends cdk.Stack {
     )
 
     // Load scrape configuration from file
-    // const scrapeConfigPath = path.resolve(__dirname, '../scraper/eks-scraper.yaml')
-    // const scrapeConfig = fs.readFileSync(scrapeConfigPath, 'utf8')
+    const scrapeConfigPath = path.resolve(__dirname, '../../k8s-res/prom/scraper.yaml')
+    const scrapeConfig = fs.readFileSync(scrapeConfigPath, 'utf8')
 
     // Create managed Prometheus collector for EKS cluster
-    // new aps.CfnScraper(this, 'EksPrometheusCollector', {
-    //   alias: `${config.environment}-eks-collector`,
-    //   scrapeConfiguration: {
-    //     configurationBlob: cdk.Fn.base64(scrapeConfig)
-    //   },
-    //   source: {
-    //     eksConfiguration: {
-    //       clusterArn: `arn:aws:eks:${this.region}:${this.account}:cluster/${clusterName}`,
-    //       subnetIds: CrossStackUtils.importListValue(ExportNames.NETWORK_PRIVATE_SUBNET_IDS),
-    //     }
-    //   },
+    new aps.CfnScraper(this, 'EksPrometheusCollector', {
+      alias: `${config.environment}-eks-collector`,
+      scrapeConfiguration: {
+        configurationBlob: scrapeConfig
+      },
+      source: {
+        eksConfiguration: {
+          clusterArn: `arn:aws:eks:${this.region}:${this.account}:cluster/${clusterName}`,
+          subnetIds: CrossStackUtils.importListValue(ExportNames.NETWORK_PRIVATE_SUBNET_IDS),
+        }
+      },
+      destination: {
+        ampConfiguration: {
+          workspaceArn: this.prometheusWorkspace.attrArn
+        }
+      }
+    })
 
-    //   destination: {
-    //     ampConfiguration: {
-    //       workspaceArn: this.prometheusWorkspace.attrArn
-    //     }
-    //   }
-    // })
-
-    // Create IAM role for Grafana to access Prometheus and CloudWatch
+    // Create IAM role for Grafana to access Prometheus, CloudWatch, and OpenSearch
     const grafanaRole = new iam.Role(this, 'GrafanaServiceRole', {
       roleName: `${config.environment}-grafana-service-role`,
       assumedBy: new iam.ServicePrincipal('grafana.amazonaws.com'),
@@ -110,6 +144,29 @@ export class ObservabilityStack extends cdk.Stack {
               resources: ['*']
             })
           ]
+        }),
+        OpenSearchAccess: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'es:ESHttpGet',
+                'es:DescribeElasticsearchDomains',
+                'es:ListDomainNames',
+                'aoss:ListCollections'
+              ],
+              resources: ['*']
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['es:ESHttpPost'],
+              resources: [
+                'arn:aws:es:*:*:domain/*/_msearch*',
+                'arn:aws:es:*:*:domain/*/_opendistro/_ppl',
+                'arn:aws:es:*:*:domain/*/collection/*'
+              ]
+            })
+          ]
         })
       }
     })
@@ -121,9 +178,14 @@ export class ObservabilityStack extends cdk.Stack {
       permissionType: 'SERVICE_MANAGED',
       name: `${config.environment}-eks-observability-grafana`,
       description: `Grafana workspace for EKS observability in ${config.environment}`,
-      dataSources: ['PROMETHEUS', 'CLOUDWATCH'],
+      dataSources: ['PROMETHEUS', 'CLOUDWATCH', 'AMAZON_OPENSEARCH_SERVICE'],
       roleArn: grafanaRole.roleArn,
-      grafanaVersion: '10.4'
+      grafanaVersion: '10.4',
+      pluginAdminEnabled: true,
+      vpcConfiguration: {
+        securityGroupIds: [opensearchSecurityGroup.securityGroupId],
+        subnetIds: privateSubnetIds
+      }
     })
 
     // Create IAM role for EKS service account to write to Prometheus
@@ -179,16 +241,20 @@ export class ObservabilityStack extends cdk.Stack {
       }
     )
 
-    // Create OpenSearch domain for log aggregation (deployed outside VPC for simplicity)
+    // Create OpenSearch domain for log aggregation (VPC internal access)
     this.opensearchDomain = new opensearch.Domain(this, 'OpenSearchCluster', {
-      // Let CDK generate a unique domain name to avoid conflicts
       version: opensearch.EngineVersion.OPENSEARCH_2_11,
+      vpc: vpc,
+      vpcSubnets: [{ 
+        subnets: [ec2.Subnet.fromSubnetId(this, 'OpenSearchSubnet', cdk.Fn.select(0, privateSubnetIds))] 
+      }],
+      securityGroups: [opensearchSecurityGroup],
       capacity: {
-        dataNodes: 1, // Single node for cost optimization
+        dataNodes: 1,
         dataNodeInstanceType:
           config.environment === 'prod' ? 'r5.large.search' : 't3.small.search',
-        masterNodes: 0, // No dedicated master nodes for cost optimization
-        multiAzWithStandbyEnabled: false // Disable Multi-AZ with standby for T3 compatibility
+        masterNodes: 0,
+        multiAzWithStandbyEnabled: false
       },
       ebs: {
         volumeSize: config.environment === 'prod' ? 50 : 20,
@@ -223,10 +289,82 @@ export class ObservabilityStack extends cdk.Stack {
       ]
     })
 
+    // Create IAM role for OpenSearch Ingestion pipelines
+    const ingestionRole = new iam.Role(this, 'IngestionRole', {
+      assumedBy: new iam.ServicePrincipal('osis-pipelines.amazonaws.com'),
+      inlinePolicies: {
+        OpenSearchAccess: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'es:ESHttpPost', 
+                'es:ESHttpPut',
+                'es:DescribeDomain',
+                'es:DescribeDomains'
+              ],
+              resources: [this.opensearchDomain.domainArn, this.opensearchDomain.domainArn + '/*']
+            })
+          ]
+        })
+      }
+    })
+
+    // Logs ingestion pipeline
+    // TODO: Add OSIS pipelines for log and trace processing
+    const logsConfigPath = path.resolve(__dirname, '../config/logs-pipeline.yaml')
+    const logsConfig = fs.readFileSync(logsConfigPath, 'utf8')
+      .replace('${OPENSEARCH_ENDPOINT}', `https://${this.opensearchDomain.domainEndpoint}`)
+      .replace('${INGESTION_ROLE_ARN}', ingestionRole.roleArn)
+      .replace('${AWS_REGION}', this.region)
+
+    const logsPipeline = new osis.CfnPipeline(this, 'LogsPipeline', {
+      pipelineName: `${config.environment}-logs-pipeline`,
+      minUnits: 1,
+      maxUnits: 4,
+      pipelineConfigurationBody: logsConfig,
+      vpcOptions: {
+        subnetIds: privateSubnetIds,
+        securityGroupIds: [opensearchSecurityGroup.securityGroupId]
+      }
+    })
+
+    // // Traces ingestion pipeline
+    const tracesConfigPath = path.resolve(__dirname, '../config/traces-pipeline.yaml')
+    const tracesConfig = fs.readFileSync(tracesConfigPath, 'utf8')
+      .replace(/\$\{OPENSEARCH_ENDPOINT\}/g, `https://${this.opensearchDomain.domainEndpoint}`)
+      .replace(/\$\{INGESTION_ROLE_ARN\}/g, ingestionRole.roleArn)
+      .replace(/\$\{AWS_REGION\}/g, cdk.Stack.of(this).region)
+
+    const tracesPipeline = new osis.CfnPipeline(this, 'TracesPipeline', {
+      pipelineName: `${config.environment}-traces-pipeline`,
+      minUnits: 1,
+      maxUnits: 4,
+      pipelineConfigurationBody: tracesConfig,
+      vpcOptions: {
+        subnetIds: privateSubnetIds,
+        securityGroupIds: [opensearchSecurityGroup.securityGroupId]
+      }
+    })
+    
+    tracesPipeline.addDependency(ingestionRole.node.defaultChild as cdk.CfnResource)
+
+    // Create OpenSearch Application for observability dashboard
+    const opensearchApplication = new opensearch.CfnApplication(this, 'ObservabilityApplication', {
+      name: `${config.environment}-observability-app`,
+      dataSources: [
+        {
+          dataSourceArn: this.opensearchDomain.domainArn,
+          dataSourceDescription: 'EKS observability logs and metrics'
+        }
+      ]
+    })
+
     // Add tags to all resources
     cdk.Tags.of(this.prometheusWorkspace).add('Environment', config.environment)
     cdk.Tags.of(this.grafanaWorkspace).add('Environment', config.environment)
     cdk.Tags.of(this.opensearchDomain).add('Environment', config.environment)
+    cdk.Tags.of(opensearchApplication).add('Environment', config.environment)
 
     // Export observability service information
     CrossStackUtils.createExport(
@@ -269,7 +407,57 @@ export class ObservabilityStack extends cdk.Stack {
       'OpenSearch Domain Endpoint'
     )
 
-    // Additional outputs for debugging and reference
+    // Create IAM role for OTEL collector
+    const otelCollectorRole = new iam.Role(this, 'OtelCollectorRole', {
+      assumedBy: new iam.FederatedPrincipal(
+        oidcProviderArn,
+        {
+          'StringEquals': new cdk.CfnJson(this, 'OtelCollectorCondition', {
+            value: {
+              [`${oidcProviderIssuer}:sub`]: 'system:serviceaccount:default:otel-collector',
+              [`${oidcProviderIssuer}:aud`]: 'sts.amazonaws.com'
+            }
+          })
+        },
+        'sts:AssumeRoleWithWebIdentity'
+      ),
+      inlinePolicies: {
+        PrometheusAccess: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'aps:RemoteWrite'
+              ],
+              resources: [this.prometheusWorkspace.attrArn]
+            })
+          ]
+        }),
+        OSISTraceAccess: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'osis:*',
+                'es:*'
+              ],
+              resources: ['*']
+            })
+          ]
+        }),
+        EC2ResourceDetection: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'ec2:DescribeInstances'
+              ],
+              resources: ['*']
+            })
+          ]
+        })
+      }
+    })
     new cdk.CfnOutput(this, 'PrometheusWorkspaceId', {
       value: this.prometheusWorkspace.attrWorkspaceId,
       description: 'Amazon Managed Prometheus Workspace ID'
@@ -303,6 +491,32 @@ export class ObservabilityStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GrafanaRoleArn', {
       value: grafanaRole.roleArn,
       description: 'IAM Role ARN for Grafana service'
+    })
+
+    new cdk.CfnOutput(this, 'OpenSearchApplicationId', {
+      value: opensearchApplication.attrId,
+      description: 'OpenSearch Application ID'
+    })
+
+    new cdk.CfnOutput(this, 'OpenSearchApplicationArn', {
+      value: opensearchApplication.attrArn,
+      description: 'OpenSearch Application ARN'
+    })
+
+    // Pipeline ingestion URLs
+    new cdk.CfnOutput(this, 'LogsIngestionUrl', {
+      value: cdk.Fn.select(0, logsPipeline.attrIngestEndpointUrls),
+      description: 'Logs pipeline ingestion URL'
+    })
+
+    new cdk.CfnOutput(this, 'TracesIngestionUrl', {
+      value: cdk.Fn.select(0, tracesPipeline.attrIngestEndpointUrls),
+      description: 'Traces pipeline ingestion URL'
+    })
+
+    new cdk.CfnOutput(this, 'OtelCollectorRoleArn', {
+      value: otelCollectorRole.roleArn,
+      description: 'OTEL Collector IAM Role ARN'
     })
   }
 }

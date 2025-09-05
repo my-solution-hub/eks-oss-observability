@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib'
 import * as ec2 from 'aws-cdk-lib/aws-ec2'
 import * as eks from 'aws-cdk-lib/aws-eks'
 import * as iam from 'aws-cdk-lib/aws-iam'
+import * as ecr from 'aws-cdk-lib/aws-ecr'
 import { Construct } from 'constructs'
 import { KubectlV31Layer } from '@aws-cdk/lambda-layer-kubectl-v31'
 import { StackConfig, ExportNames, CrossStackUtils } from './stack-config'
@@ -35,9 +36,9 @@ export class InfrastructureStack extends cdk.Stack {
 
     // Determine Kubernetes version
     const kubernetesVersion =
-      config.eksVersion === '1.31'
-        ? eks.KubernetesVersion.V1_31
-        : eks.KubernetesVersion.V1_29
+      config.eksVersion === '1.32'
+        ? eks.KubernetesVersion.V1_32
+        : eks.KubernetesVersion.V1_31
 
     // Create EKS Cluster
     this.cluster = new eks.Cluster(this, 'EksCluster', {
@@ -119,6 +120,22 @@ export class InfrastructureStack extends cdk.Stack {
     cdk.Tags.of(this.cluster).add('Stack', 'Infrastructure')
     cdk.Tags.of(nodeGroup).add('Environment', config.environment)
 
+    // create ecr repo, not import
+    const helloServiceRepo = new ecr.Repository(this, 'HelloServiceRepo', {
+      repositoryName: `${this.cluster.clusterName}-hello-service`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY
+    })
+
+    const worldServiceRepo = new ecr.Repository(this, 'WorldServiceRepo', {
+      repositoryName: `${this.cluster.clusterName}-world-service`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY
+    })
+
+    const trafficGeneratorRepo = new ecr.Repository(this, 'TrafficGeneratorRepo', {
+      repositoryName: `${this.cluster.clusterName}-traffic-generator`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY
+    })
+    
     // Export cluster information for other stacks
     CrossStackUtils.createExport(
       this,
@@ -152,7 +169,61 @@ export class InfrastructureStack extends cdk.Stack {
       'EKS OIDC provider issuer URL for IRSA'
     )
 
-    // Additional outputs for debugging and reference
+    // Create IAM role for FluentBit using IRSA
+    const fluentBitRole = new iam.Role(this, 'FluentBitRole', {
+      assumedBy: new iam.FederatedPrincipal(
+        this.cluster.openIdConnectProvider.openIdConnectProviderArn,
+        {
+          'StringEquals': new cdk.CfnJson(this, 'FluentBitCondition', {
+            value: {
+              [`${this.cluster.clusterOpenIdConnectIssuer}:sub`]: 'system:serviceaccount:kube-system:fluent-bit',
+              [`${this.cluster.clusterOpenIdConnectIssuer}:aud`]: 'sts.amazonaws.com'
+            }
+          })
+        },
+        'sts:AssumeRoleWithWebIdentity'
+      ),
+      inlinePolicies: {
+        OpenSearchAccess: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'es:ESHttpPost',
+                'es:ESHttpPut',
+                'osis:*'
+              ],
+              resources: ['*']
+            })
+          ]
+        })
+      }
+    })
+
+    // // Create assumable role for OSIS ingestion
+    // const fluentBitIngestionRole = new iam.Role(this, 'FluentBitIngestionRole', {
+    //   roleName: `${config.environment}-fluent-bit-ingestion-role`,
+    //   assumedBy: fluentBitRole,
+    //   inlinePolicies: {
+    //     OSISIngestion: new iam.PolicyDocument({
+    //       statements: [
+    //         new iam.PolicyStatement({
+    //           effect: iam.Effect.ALLOW,
+    //           actions: ['osis:Ingest'],
+    //           resources: ['*']
+    //         })
+    //       ]
+    //     })
+    //   }
+    // })
+
+    // // Update FluentBit role to assume ingestion role
+    // fluentBitRole.addToPolicy(new iam.PolicyStatement({
+    //   effect: iam.Effect.ALLOW,
+    //   actions: ['sts:AssumeRole'],
+    //   resources: [fluentBitIngestionRole.roleArn]
+    // }))
+
     new cdk.CfnOutput(this, 'ClusterName', {
       value: this.cluster.clusterName,
       description: 'EKS Cluster Name'
@@ -177,5 +248,30 @@ export class InfrastructureStack extends cdk.Stack {
       value: nodeGroup.nodegroupName,
       description: 'EKS Node Group Name'
     })
+
+    new cdk.CfnOutput(this, 'HelloServiceRepoUri', {
+      value: helloServiceRepo.repositoryUri,
+      description: 'Hello Service ECR Repository URI'
+    })
+
+    new cdk.CfnOutput(this, 'WorldServiceRepoUri', {
+      value: worldServiceRepo.repositoryUri,
+      description: 'World Service ECR Repository URI'
+    })
+
+    new cdk.CfnOutput(this, 'TrafficGeneratorRepoUri', {
+      value: trafficGeneratorRepo.repositoryUri,
+      description: 'Traffic Generator ECR Repository URI'
+    })
+
+    new cdk.CfnOutput(this, 'FluentBitRoleArn', {
+      value: fluentBitRole.roleArn,
+      description: 'FluentBit IAM Role ARN'
+    })
+
+    // new cdk.CfnOutput(this, 'FluentBitIngestionRoleArn', {
+    //   value: fluentBitIngestionRole.roleArn,
+    //   description: 'FluentBit Ingestion Role ARN for OSIS'
+    // })
   }
 }

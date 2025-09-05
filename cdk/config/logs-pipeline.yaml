@@ -1,0 +1,16 @@
+version: "2"
+log-pipeline:
+  source:
+    http:
+      path: "/log/ingest"
+  processor:
+    - date:
+        from_time_received: true
+        destination: "@timestamp"
+  sink:
+    - opensearch:
+        hosts: ["${OPENSEARCH_ENDPOINT}"]
+        index: "logs-%{yyyy.MM.dd.HH}"
+        aws:
+          sts_role_arn: "${INGESTION_ROLE_ARN}"
+          region: "${AWS_REGION}"

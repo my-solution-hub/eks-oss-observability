@@ -1,0 +1,242 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: default
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+      memory_limiter:
+        limit_mib: 512
+        check_interval: 5s
+      filter:
+        metrics:
+          exclude:
+            match_type: strict
+            metric_names:
+              - otlp.exporter.exported
+              - queueSize
+              - otlp.exporter.seen
+              - processedSpans
+      resource:
+        attributes:
+          - key: service.name
+            action: upsert
+            from_attribute: service.name
+      resourcedetection/eks:
+        detectors: [env, eks, ec2]
+        timeout: 15s
+        override: false
+        eks:
+          resource_attributes:
+            k8s.cluster.name:
+              enabled: true
+
+    connectors:
+      spanmetrics:
+        histogram:
+          explicit:
+            buckets: [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+        dimensions:
+          - name: http.method
+            default: GET
+          - name: http.status_code
+          - name: http.route
+        metrics_expiration: 5m
+        exemplars:
+          enabled: false
+        metrics_flush_interval: 30s
+        exclude_dimensions: ["span.name"]
+
+    extensions:
+      sigv4auth/aps:
+        region: ${AWS_REGION}
+        service: aps
+      sigv4auth/osis:
+        region: ${AWS_REGION}
+        service: osis
+      sigv4auth/es:
+        region: ${AWS_REGION}
+        service: es
+
+    exporters:
+      prometheusremotewrite:
+        endpoint: ${PROMETHEUS_REMOTE_WRITE_ENDPOINT}
+        auth:
+          authenticator: sigv4auth/aps
+      # otlphttp/traces:
+      #   traces_endpoint: https://${TRACE_PIPELINE_ENDPOINT}/v1/traces
+      #   auth:
+      #     authenticator: sigv4auth/osis
+        # compression: none
+      opensearch/trace:
+        http:
+          endpoint: https://${OPENSEARCH_ENDPOINT}
+          auth:
+            authenticator: sigv4auth/es
+        traces_index: "otel-traces-%{service.name}"
+        traces_index_fallback: "default-service"
+        traces_index_time_format: "yyyy.MM.dd"
+
+    service:
+      telemetry:
+        logs:
+          level: debug
+      pipelines:
+        traces:
+          receivers: [otlp]
+
+          # exporters: [otlphttp/traces]
+          exporters: [opensearch/trace]
+        
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, filter, batch]
+          exporters: [prometheusremotewrite]
+          
+        # traces/spanmetrics:
+        #   receivers: [otlp]
+        #   processors: [memory_limiter, resourcedetection/eks]
+        #   exporters: [spanmetrics]
+          
+        # metrics/spanmetrics:
+        #   receivers: [spanmetrics]
+        #   processors: [memory_limiter, resource, batch]
+        #   exporters: [prometheusremotewrite]
+
+      extensions: [sigv4auth/aps, sigv4auth/osis, sigv4auth/es]
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: default
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      serviceAccountName: otel-collector
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      securityContext:
+        fsGroup: 65534
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.134.1
+        args:
+        - --config=/etc/otel-collector-config/config.yaml
+        env:
+        - name: AWS_STS_REGIONAL_ENDPOINTS
+          value: "regional"
+        - name: AWS_REGION
+          value: "${AWS_REGION}"
+        - name: AWS_DEFAULT_REGION
+          value: "${AWS_REGION}"
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - containerPort: 4317
+          name: otlp-grpc
+        - containerPort: 4318
+          name: otlp-http
+        volumeMounts:
+        - name: otel-collector-config-vol
+          mountPath: /etc/otel-collector-config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: otel-collector-config-vol
+        configMap:
+          name: otel-collector-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: default
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+  - port: 4317
+    targetPort: 4317
+    name: otlp-grpc
+  - port: 4318
+    targetPort: 4318
+    name: otlp-http
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: default
+  annotations:
+    eks.amazonaws.com/role-arn: ${OTEL_COLLECTOR_ROLE_ARN}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/proxy", "services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector
+subjects:
+- kind: ServiceAccount
+  name: otel-collector
+  namespace: default
