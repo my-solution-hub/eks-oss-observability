@@ -136,6 +136,12 @@ export class InfrastructureStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY
     })
     
+    // Add EKS Pod Identity addon
+    new eks.CfnAddon(this, 'PodIdentityAddon', {
+      clusterName: this.cluster.clusterName,
+      addonName: 'eks-pod-identity-agent'
+    })
+    
     // Export cluster information for other stacks
     CrossStackUtils.createExport(
       this,

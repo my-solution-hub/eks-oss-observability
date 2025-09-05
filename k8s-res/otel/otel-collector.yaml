@@ -41,21 +41,21 @@ data:
             k8s.cluster.name:
               enabled: true
 
-    connectors:
-      spanmetrics:
-        histogram:
-          explicit:
-            buckets: [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
-        dimensions:
-          - name: http.method
-            default: GET
-          - name: http.status_code
-          - name: http.route
-        metrics_expiration: 5m
-        exemplars:
-          enabled: false
-        metrics_flush_interval: 30s
-        exclude_dimensions: ["span.name"]
+    # connectors:
+    #   spanmetrics:
+    #     histogram:
+    #       explicit:
+    #         buckets: [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+    #     dimensions:
+    #       - name: http.method
+    #         default: GET
+    #       - name: http.status_code
+    #       - name: http.route
+    #     metrics_expiration: 5m
+    #     exemplars:
+    #       enabled: false
+    #     metrics_flush_interval: 30s
+    #     exclude_dimensions: ["span.name"]
 
     extensions:
       sigv4auth/aps:
@@ -73,30 +73,28 @@ data:
         endpoint: ${PROMETHEUS_REMOTE_WRITE_ENDPOINT}
         auth:
           authenticator: sigv4auth/aps
-      # otlphttp/traces:
-      #   traces_endpoint: https://${TRACE_PIPELINE_ENDPOINT}/v1/traces
-      #   auth:
-      #     authenticator: sigv4auth/osis
-        # compression: none
-      opensearch/trace:
-        http:
-          endpoint: https://${OPENSEARCH_ENDPOINT}
-          auth:
-            authenticator: sigv4auth/es
-        traces_index: "otel-traces-%{service.name}"
-        traces_index_fallback: "default-service"
-        traces_index_time_format: "yyyy.MM.dd"
+      otlphttp/traces:
+        traces_endpoint: https://${TRACE_PIPELINE_ENDPOINT}/v1/traces
+        auth:
+          authenticator: sigv4auth/osis
+        compression: none
+      # opensearch/trace:
+      #   http:
+      #     endpoint: https://${OPENSEARCH_ENDPOINT}
+      #     auth:
+      #       authenticator: sigv4auth/es
+      #     traces_index: otel-v1-apm-span-{YYYY.MM.DD}
 
     service:
-      telemetry:
-        logs:
-          level: debug
+      # telemetry:
+      #   logs:
+      #     level: debug
       pipelines:
         traces:
           receivers: [otlp]
 
-          # exporters: [otlphttp/traces]
-          exporters: [opensearch/trace]
+          # exporters: [opensearch/trace]
+          exporters: [otlphttp/traces]
         
         metrics:
           receivers: [otlp]
@@ -133,12 +131,11 @@ spec:
       labels:
         app: otel-collector
     spec:
-      serviceAccountName: otel-collector
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      hostNetwork: true
-      securityContext:
-        fsGroup: 65534
+      # serviceAccountName: otel-collector
+      # hostNetwork: true
+      # dnsPolicy: ClusterFirstWithHostNet
+      # securityContext:
+      #   fsGroup: 65534
       containers:
       - name: otel-collector
         image: otel/opentelemetry-collector-contrib:0.134.1
@@ -209,8 +206,8 @@ kind: ServiceAccount
 metadata:
   name: otel-collector
   namespace: default
-  annotations:
-    eks.amazonaws.com/role-arn: ${OTEL_COLLECTOR_ROLE_ARN}
+  # annotations:
+  #   eks.amazonaws.com/role-arn: ${OTEL_COLLECTOR_ROLE_ARN}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

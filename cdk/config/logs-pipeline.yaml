@@ -4,13 +4,24 @@ log-pipeline:
     http:
       path: "/log/ingest"
   processor:
+    - add_entries:
+        entries:
+          - key: "kubernetes/labels/app_component"
+            value: '${/kubernetes/labels/app.kubernetes.io/component}'
+    - delete_entries:
+        with_keys:
+          - "body"
+          - "kubernetes"
+          - "annotations"
+          - "labels"
+          - "kubernetes/labels/app.kubernetes.io/component"
     - date:
         from_time_received: true
         destination: "@timestamp"
   sink:
     - opensearch:
-        hosts: ["${OPENSEARCH_ENDPOINT}"]
-        index: "logs-%{yyyy.MM.dd.HH}"
+        hosts: ["https://vpc-opensearchclust-ovnmssu2swaw-b6jhejbrfrwgd2xmcuuam4oo4y.ap-southeast-1.es.amazonaws.com"]
+        index: "logs-%{yyyy.MM.dd}"
         aws:
-          sts_role_arn: "${INGESTION_ROLE_ARN}"
-          region: "${AWS_REGION}"
+          sts_role_arn: "arn:aws:iam::613477150601:role/dev-observability-stack-IngestionRoleFC2D3E97-27vx7VIWLepE"
+          region: "ap-southeast-1"

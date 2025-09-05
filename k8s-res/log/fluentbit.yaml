@@ -16,7 +16,8 @@ data:
 
     @INCLUDE input-kubernetes.conf
     @INCLUDE filter-kubernetes.conf
-    @INCLUDE output-opensearch.conf
+    # @INCLUDE output-opensearch.conf
+    @INCLUDE output-ingestion.conf
 
   input-kubernetes.conf: |
     [INPUT]
@@ -43,20 +44,35 @@ data:
         K8S-Logging.Parser  On
         K8S-Logging.Exclude Off
 
-  output-opensearch.conf: |
+  # output-opensearch.conf: |
+  #   [OUTPUT]
+  #       Name            opensearch
+  #       Match           *
+  #       Host            ${OPENSEARCH_ENDPOINT}
+  #       Port            443
+  #       Index           logs-%Y.%m.%d.%H
+  #       AWS_Auth        On
+  #       AWS_Region      ${AWS_REGION}
+  #       tls             On
+  #       tls.verify      Off
+  #       Suppress_Type_Name On
+  #       Trace_Error     On
+  #       Trace_Output    On        
+
+  output-ingestion.conf: |
     [OUTPUT]
-        Name            opensearch
+        Name            http
         Match           *
-        Host            ${OPENSEARCH_ENDPOINT}
+        Host            ${LOGS_INGESTION_URL}
         Port            443
-        Index           logs-%Y.%m.%d.%H
+        URI             /log/ingest
+        Format          json
         AWS_Auth        On
         AWS_Region      ${AWS_REGION}
+        AWS_Service     osis
         tls             On
         tls.verify      Off
-        Suppress_Type_Name On
-        Trace_Error     On
-        Trace_Output    On        
+        Log_Level       trace
 
   parsers.conf: |
     [PARSER]
@@ -106,6 +122,8 @@ spec:
           value: "${AWS_REGION}"
         - name: OPENSEARCH_ENDPOINT
           value: "${OPENSEARCH_ENDPOINT}"
+        - name: LOG_PIPELINE_ENDPOINT
+          value: "${LOG_PIPELINE_ENDPOINT}"
         volumeMounts:
         - name: varlog
           mountPath: /var/log
