@@ -6,6 +6,7 @@ import * as aps from 'aws-cdk-lib/aws-aps'
 import * as grafana from 'aws-cdk-lib/aws-grafana'
 import * as opensearch from 'aws-cdk-lib/aws-opensearchservice'
 import * as osis from 'aws-cdk-lib/aws-osis'
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2'
 import * as fs from 'fs'
 import * as path from 'path'
 import { Construct } from 'constructs'
@@ -33,12 +34,16 @@ export class ObservabilityStack extends cdk.Stack {
     const privateSubnetIds = CrossStackUtils.importListValue(
       ExportNames.NETWORK_PRIVATE_SUBNET_IDS
     )
+    const publicSubnetIds = CrossStackUtils.importListValue(
+      ExportNames.NETWORK_PUBLIC_SUBNET_IDS
+    )
 
     const vpc = ec2.Vpc.fromVpcAttributes(this, 'ImportedVpc', {
       vpcId,
       vpcCidrBlock: vpcCidr,
       availabilityZones: cdk.Fn.getAzs(),
-      privateSubnetIds
+      privateSubnetIds,
+      publicSubnetIds
     })
 
     // Create security group for OpenSearch
@@ -52,11 +57,11 @@ export class ObservabilityStack extends cdk.Stack {
       }
     )
 
-    // Allow HTTPS access from VPC CIDR
+    // Allow HTTPS access from VPC CIDR (for NLB and OSIS pipelines)
     opensearchSecurityGroup.addIngressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
-      'HTTPS access for OpenSearch and OSIS pipelines'
+      'HTTPS access from anywhere'
     )
 
     opensearchSecurityGroup.addEgressRule(
@@ -163,7 +168,7 @@ export class ObservabilityStack extends cdk.Stack {
                 'es:ESHttpGet',
                 'es:DescribeElasticsearchDomains',
                 'es:ListDomainNames',
-                'aoss:ListCollections'
+                'aoss:*',
               ],
               resources: ['*']
             }),
@@ -251,9 +256,9 @@ export class ObservabilityStack extends cdk.Stack {
       }
     )
 
-    // Create OpenSearch domain for log aggregation (VPC internal access)
+    // Create OpenSearch domain with fine-grained access control
     this.opensearchDomain = new opensearch.Domain(this, 'OpenSearchCluster', {
-      version: opensearch.EngineVersion.OPENSEARCH_2_11,
+      version: opensearch.EngineVersion.OPENSEARCH_2_19,
       vpc: vpc,
       vpcSubnets: [
         {
@@ -270,7 +275,7 @@ export class ObservabilityStack extends cdk.Stack {
       capacity: {
         dataNodes: 1,
         dataNodeInstanceType:
-          config.environment === 'prod' ? 'r5.large.search' : 't3.small.search',
+          config.environment === 'prod' ? 'm7g.xlarge.search' : 'm7g.large.search',
         masterNodes: 0,
         multiAzWithStandbyEnabled: false
       },
@@ -291,20 +296,42 @@ export class ObservabilityStack extends cdk.Stack {
         enabled: true
       },
       enforceHttps: true,
+      fineGrainedAccessControl: {
+        masterUserName: 'admin',
+        masterUserPassword: cdk.SecretValue.unsafePlainText('Admin123!')
+      },
       accessPolicies: [
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
-          principals: [new iam.AccountRootPrincipal()],
-          actions: [
-            'es:ESHttpGet',
-            'es:ESHttpPost',
-            'es:ESHttpPut',
-            'es:ESHttpDelete',
-            'es:ESHttpHead'
-          ],
+          principals: [new iam.AnyPrincipal()],
+          actions: ['es:*'],
           resources: ['*']
         })
       ]
+    })
+
+    // Create NLB for public OpenSearch access
+    const opensearchNLB = new elbv2.NetworkLoadBalancer(this, 'OpenSearchNLB', {
+      vpc,
+      internetFacing: true,
+      vpcSubnets: {
+        subnets: vpc.publicSubnets
+      }
+    })
+
+    // Create target group for OpenSearch
+    const opensearchTargetGroup = new elbv2.NetworkTargetGroup(this, 'OpenSearchTargetGroup', {
+      vpc,
+      port: 443,
+      protocol: elbv2.Protocol.TCP,
+      targetType: elbv2.TargetType.IP
+    })
+
+    // Create HTTPS listener
+    opensearchNLB.addListener('HttpsListener', {
+      port: 443,
+      protocol: elbv2.Protocol.TCP,
+      defaultTargetGroups: [opensearchTargetGroup]
     })
 
     // Create IAM role for OpenSearch Ingestion pipelines
@@ -646,6 +673,21 @@ export class ObservabilityStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'OtelCollectorRoleArn', {
       value: otelCollectorRole.attrArn,
       description: 'OTEL Collector IAM Role ARN'
+    })
+
+    new cdk.CfnOutput(this, 'OpenSearchNLBDNS', {
+      value: opensearchNLB.loadBalancerDnsName,
+      description: 'NLB DNS name for public OpenSearch access'
+    })
+
+    new cdk.CfnOutput(this, 'OpenSearchTargetGroupArn', {
+      value: opensearchTargetGroup.targetGroupArn,
+      description: 'Target Group ARN for manual IP registration'
+    })
+
+    new cdk.CfnOutput(this, 'OpenSearchCredentials', {
+      value: 'Username: admin, Password: Admin123!',
+      description: 'OpenSearch dashboard login credentials'
     })
   }
 }

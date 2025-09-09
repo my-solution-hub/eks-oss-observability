@@ -39,10 +39,57 @@ data:
         Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
         Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
         Kube_Tag_Prefix     kube.var.log.containers.
-        Merge_Log           On
-        Merge_Log_Key       log_processed
+        Merge_Log           Off
         K8S-Logging.Parser  On
         K8S-Logging.Exclude Off
+        Labels              On
+        Annotations         On
+
+    [FILTER]
+        Name                parser
+        Match               kube.*
+        Key_Name            log
+        Parser              container_log_parser
+        Reserve_Data        On
+
+    [FILTER]
+        Name                parser
+        Match               kube.*
+        Key_Name            message
+        Parser              json_parser
+        Reserve_Data        On
+
+    [FILTER]
+        Name                modify
+        Match               kube.*
+        Remove              trace_id
+        Remove              span_id
+        Remove              logtag
+        Remove              time
+
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        Operation           lift
+        Nested_under        kubernetes
+        Add_prefix          k8s_
+
+    [FILTER]
+        Name                modify
+        Match               kube.*
+        Remove              k8s_container_hash
+        Remove              k8s_annotations
+        Remove              k8s_pod_id
+        Remove              k8s_docker_id
+        Remove              k8s_labels[pod-template-hash]
+
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        Operation           nest
+        Wildcard            k8s_*
+        Nested_under        kubernetes
+        Remove_prefix       k8s_
 
   # output-opensearch.conf: |
   #   [OUTPUT]
@@ -57,7 +104,7 @@ data:
   #       tls.verify      Off
   #       Suppress_Type_Name On
   #       Trace_Error     On
-  #       Trace_Output    On        
+  #       Trace_Output    On
 
   output-ingestion.conf: |
     [OUTPUT]
@@ -76,10 +123,25 @@ data:
 
   parsers.conf: |
     [PARSER]
-        Name   docker
-        Format json
-        Time_Key time
-        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Keep   On
+
+    [PARSER]
+        Name        container_log_parser
+        Format      regex
+        Regex       ^(?<time>[^ ]*) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<message>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Keep   On
+
+    [PARSER]
+        Name        json_parser
+        Format      json
+        Time_Key    @timestamp
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
         Time_Keep   On
 
 ---
@@ -91,7 +153,7 @@ metadata:
   labels:
     k8s-app: fluent-bit-logging
     version: v1
-    kubernetes.io/cluster-service: "true"
+    kubernetes.io/cluster-service: 'true'
 spec:
   selector:
     matchLabels:
@@ -101,66 +163,66 @@ spec:
       labels:
         k8s-app: fluent-bit-logging
         version: v1
-        kubernetes.io/cluster-service: "true"
+        kubernetes.io/cluster-service: 'true'
     spec:
       serviceAccount: fluent-bit
       serviceAccountName: fluent-bit
       tolerations:
-      - key: node-role.kubernetes.io/master
-        operator: Exists
-        effect: NoSchedule
-      - operator: "Exists"
-        effect: "NoExecute"
-      - operator: "Exists"
-        effect: "NoSchedule"
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - operator: 'Exists'
+          effect: 'NoExecute'
+        - operator: 'Exists'
+          effect: 'NoSchedule'
       containers:
-      - name: fluent-bit
-        image: amazon/aws-for-fluent-bit:2.33.2
-        imagePullPolicy: Always
-        env:
-        - name: AWS_REGION
-          value: "${AWS_REGION}"
-        - name: OPENSEARCH_ENDPOINT
-          value: "${OPENSEARCH_ENDPOINT}"
-        - name: LOG_PIPELINE_ENDPOINT
-          value: "${LOG_PIPELINE_ENDPOINT}"
-        volumeMounts:
-        - name: varlog
-          mountPath: /var/log
-        - name: varlibdockercontainers
-          mountPath: /var/lib/docker/containers
-          readOnly: true
-        - name: fluent-bit-config
-          mountPath: /fluent-bit/etc/
-        - name: runlogjournal
-          mountPath: /run/log/journal
-          readOnly: true
-        - name: dmesg
-          mountPath: /var/log/dmesg
-          readOnly: true
-        resources:
-          limits:
-            memory: 200Mi
-          requests:
-            cpu: 100m
-            memory: 200Mi
+        - name: fluent-bit
+          image: amazon/aws-for-fluent-bit:2.33.2
+          imagePullPolicy: Always
+          env:
+            - name: AWS_REGION
+              value: '${AWS_REGION}'
+            - name: OPENSEARCH_ENDPOINT
+              value: '${OPENSEARCH_ENDPOINT}'
+            - name: LOG_PIPELINE_ENDPOINT
+              value: '${LOG_PIPELINE_ENDPOINT}'
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: fluent-bit-config
+              mountPath: /fluent-bit/etc/
+            - name: runlogjournal
+              mountPath: /run/log/journal
+              readOnly: true
+            - name: dmesg
+              mountPath: /var/log/dmesg
+              readOnly: true
+          resources:
+            limits:
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 200Mi
       terminationGracePeriodSeconds: 10
       volumes:
-      - name: varlog
-        hostPath:
-          path: /var/log
-      - name: varlibdockercontainers
-        hostPath:
-          path: /var/lib/docker/containers
-      - name: fluent-bit-config
-        configMap:
-          name: fluent-bit-config
-      - name: runlogjournal
-        hostPath:
-          path: /run/log/journal
-      - name: dmesg
-        hostPath:
-          path: /var/log/dmesg
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: fluent-bit-config
+          configMap:
+            name: fluent-bit-config
+        - name: runlogjournal
+          hostPath:
+            path: /run/log/journal
+        - name: dmesg
+          hostPath:
+            path: /var/log/dmesg
 
 ---
 apiVersion: v1
@@ -177,12 +239,12 @@ kind: ClusterRole
 metadata:
   name: fluent-bit-read
 rules:
-- apiGroups: [""]
-  resources:
-  - namespaces
-  - pods
-  - pods/logs
-  verbs: ["get", "list", "watch"]
+  - apiGroups: ['']
+    resources:
+      - namespaces
+      - pods
+      - pods/logs
+    verbs: ['get', 'list', 'watch']
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -194,6 +256,6 @@ roleRef:
   kind: ClusterRole
   name: fluent-bit-read
 subjects:
-- kind: ServiceAccount
-  name: fluent-bit
-  namespace: kube-system
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: kube-system
