@@ -4,6 +4,11 @@ log-pipeline:
     http:
       path: "/log/ingest"
   processor:
+    - delete_entries:
+        with_keys:
+          - "/kubernetes/labels/app.kubernetes.io/component"
+          - "/kubernetes/labels/app.kubernetes.io/name"
+          - "/kubernetes/labels/app.kubernetes.io/instance"
     - add_entries:
         entries:
           - key: "service_name"

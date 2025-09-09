@@ -123,17 +123,20 @@ export class InfrastructureStack extends cdk.Stack {
     // create ecr repo, not import
     const helloServiceRepo = new ecr.Repository(this, 'HelloServiceRepo', {
       repositoryName: `${this.cluster.clusterName}-hello-service`,
-      removalPolicy: cdk.RemovalPolicy.DESTROY
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      emptyOnDelete: true
     })
 
     const worldServiceRepo = new ecr.Repository(this, 'WorldServiceRepo', {
       repositoryName: `${this.cluster.clusterName}-world-service`,
-      removalPolicy: cdk.RemovalPolicy.DESTROY
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      emptyOnDelete: true
     })
 
     const trafficGeneratorRepo = new ecr.Repository(this, 'TrafficGeneratorRepo', {
       repositoryName: `${this.cluster.clusterName}-traffic-generator`,
-      removalPolicy: cdk.RemovalPolicy.DESTROY
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      emptyOnDelete: true
     })
     
     // Add EKS Pod Identity addon

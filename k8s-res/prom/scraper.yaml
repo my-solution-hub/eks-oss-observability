@@ -8,11 +8,23 @@ scrape_configs:
     - role: endpoints
       namespaces:
         names:
-        - kube-state-metrics
+        - kube-system
     relabel_configs:
     - source_labels: [__meta_kubernetes_service_name]
       action: keep
       regex: kube-state-metrics
+    - action: labelmap
+      regex: __meta_kubernetes_pod_label_(.+)
+    # Map specific labels to cleaner names
+    metric_relabel_configs:
+    - source_labels: [label_environment]
+      target_label: environment
+    - source_labels: [label_project]
+      target_label: project
+    - source_labels: [label_team]
+      target_label: team
+    - source_labels: [label_version]
+      target_label: version
   
   # Node-level metrics from kubelet
   - job_name: kubelet
@@ -96,14 +108,18 @@ scrape_configs:
       regex: ([^:]+)(?::\d+)?;(\d+)
       replacement: $1:$2
       target_label: __address__
-    # Add custom pod labels to all metrics from this job
-    - source_labels: [__meta_kubernetes_pod_label_team]
-      target_label: team
-    - source_labels: [__meta_kubernetes_pod_label_environment]
+    - replacement: kubernetes-pods
+      target_label: job
+    - action: labelmap
+      regex: __meta_kubernetes_pod_label_(.+)
+    metric_relabel_configs:
+    - source_labels: [label_environment]
       target_label: environment
-    - source_labels: [__meta_kubernetes_pod_label_project]
+    - source_labels: [label_project]
       target_label: project
-    - source_labels: [__meta_kubernetes_pod_label_version]
+    - source_labels: [label_team]
+      target_label: team
+    - source_labels: [label_version]
       target_label: version
   
   # AWS VPC CNI metrics

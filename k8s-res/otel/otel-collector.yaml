@@ -131,7 +131,7 @@ spec:
       labels:
         app: otel-collector
     spec:
-      # serviceAccountName: otel-collector
+      serviceAccountName: otel-collector
       # hostNetwork: true
       # dnsPolicy: ClusterFirstWithHostNet
       # securityContext:

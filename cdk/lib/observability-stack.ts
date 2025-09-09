@@ -7,6 +7,7 @@ import * as grafana from 'aws-cdk-lib/aws-grafana'
 import * as opensearch from 'aws-cdk-lib/aws-opensearchservice'
 import * as osis from 'aws-cdk-lib/aws-osis'
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2'
+import * as logs from 'aws-cdk-lib/aws-logs'
 import * as fs from 'fs'
 import * as path from 'path'
 import { Construct } from 'constructs'
@@ -260,6 +261,7 @@ export class ObservabilityStack extends cdk.Stack {
     this.opensearchDomain = new opensearch.Domain(this, 'OpenSearchCluster', {
       version: opensearch.EngineVersion.OPENSEARCH_2_19,
       vpc: vpc,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
       vpcSubnets: [
         {
           subnets: [
@@ -280,7 +282,7 @@ export class ObservabilityStack extends cdk.Stack {
         multiAzWithStandbyEnabled: false
       },
       ebs: {
-        volumeSize: config.environment === 'prod' ? 50 : 20,
+        volumeSize: config.environment === 'prod' ? 50 : 30,
         volumeType: ec2.EbsDeviceVolumeType.GP3
       },
       zoneAwareness: {
@@ -296,18 +298,38 @@ export class ObservabilityStack extends cdk.Stack {
         enabled: true
       },
       enforceHttps: true,
-      fineGrainedAccessControl: {
-        masterUserName: 'admin',
-        masterUserPassword: cdk.SecretValue.unsafePlainText('Admin123!')
-      },
       accessPolicies: [
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
-          principals: [new iam.AnyPrincipal()],
+          principals: [
+            new iam.AnyPrincipal(),
+            new iam.ArnPrincipal('arn:aws:iam::613477150601:role/Admin')
+          ],
           actions: ['es:*'],
           resources: ['*']
         })
       ]
+    })
+
+    // Add CloudWatch Logs resource policy for OpenSearch
+    new logs.CfnResourcePolicy(this, 'OpenSearchLogsPolicy', {
+      policyName: 'OpenSearchLogsPolicy',
+      policyDocument: JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Effect: 'Allow',
+            Principal: {
+              Service: 'es.amazonaws.com'
+            },
+            Action: [
+              'logs:CreateLogStream',
+              'logs:PutLogEvents'
+            ],
+            Resource: `arn:aws:logs:${this.region}:${this.account}:log-group:*OpenSearch*`
+          }
+        ]
+      })
     })
 
     // Create NLB for public OpenSearch access
@@ -363,11 +385,7 @@ export class ObservabilityStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         principals: [new iam.ArnPrincipal(ingestionRole.roleArn)],
         actions: [
-          'es:ESHttpGet',
-          'es:ESHttpPost',
-          'es:ESHttpPut',
-          'es:ESHttpDelete',
-          'es:ESHttpHead'
+          'es:*'
         ],
         resources: [
           this.opensearchDomain.domainArn,
@@ -463,7 +481,7 @@ export class ObservabilityStack extends cdk.Stack {
         dataSources: [
           {
             dataSourceArn: this.opensearchDomain.domainArn,
-            dataSourceDescription: 'EKS observability logs and metrics'
+            dataSourceDescription: 'EKS observability logs and traces'
           }
         ]
       }
